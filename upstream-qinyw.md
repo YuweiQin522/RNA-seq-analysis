@@ -1,0 +1,181 @@
+# RNA-seq analysis
+背景知识、软件安装和数据获取不再赘述，详情请见[shuyi.md](https://github.com/ZhaiLab-SUSTech/Learning/blob/main/001_RNA-seq%E5%92%8CIR%E8%AE%A1%E7%AE%97/%E7%AC%AC%E4%B8%80%E9%98%B6%E6%AE%B5%E4%BD%9C%E4%B8%9A/shuyi.md#tip)
+## 1.测序数据获得及质控
+`数据获得`：H01-03-2N是野生型WT，H02-03-6是突变体cmt3a
+
+```
+#数据存放路径
+/public/Zhaijx/ALLDATA/Sequencing/20190613_80-300046828/2019.6/80-300046828/N1902787_HDH_80-300046828_eukRNASEQ/combined/H02-03-6*gz
+/public/Zhaijx/ALLDATA/Sequencing/20190613_80-300046828/2019.6/80-300046828/N1902787_HDH_80-300046828_eukRNASEQ/combined/H01-03-2N*gz
+```
+`raw data 质控` :fastqc&multiqc
+```
+#创建qc.sh脚本文件
+$vi qc.sh
+
+#i：在当前光标所在处插入输入文字
+for i in /public/Zhaijx/ALLDATA/Sequencing/20190613_80-300046828/2019.6/80-300046828/N1902787_HDH_80-300046828_eukRNASEQ/combined/H02-03-6*gz;do 
+/public/home/qinyw/software/miniconda3/envs/rnaseq/bin/fastqc -o /public/home/qinyw/data/practice/rice/qc_test/ ${i} & 
+done
+#Esc键退出，退出后按：键
+#：wq!保存并退出
+
+#激活环境
+$conda activate rnaseq
+#运行脚本
+$chmod +x qc.sh #将脚本变为可执行文件
+$qsub -I -l nodes=node08:ppn=2 -X qc.sh #或者用sh qc.sh
+#查看任务进程
+$qstat -u qinyw
+#multiqc 生成质控报告 (multiqc需要在python3环境下使用)
+cd /public/home/qinyw/data/practice/rice/qc_test/
+multiqc ./
+#查看质控报告 (需要在登陆节点查看)
+$firefox /public/home/qinyw/data/practice/rice/qc_test/multiqc_report.html
+```
+
+`trim` ：cutadapt去除接头序列  
+P7 adapter（read1）：AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC 
+P5 adapter（read2）：AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT
+```
+#创建cutadapt.sh脚本文件
+$vi cutadapt.sh
+for i in /public/Zhaijx/ALLDATA/Sequencing/20190613_80-300046828/2019.6/80-300046828/N1902787_HDH_80-300046828_eukRNASEQ/combined/*_R1.fastq.gz;do 
+fqnm_1_in=`basename ${i}`
+fqnm_1_out=${fqnm_1_in/_combined_R1.fastq.gz/}_R1.clean.fq.gz 
+fqnm_2_in=${fqnm_1_in/_R1.fastq.gz/}_R2.fastq.gz 
+fqnm_2_out=${fqnm_2_in/_combined_R2.fastq.gz/}_R2.clean.fq.gz 
+fqnm_2_in=${i/_R1.fastq.gz/}_R2.fastq.gz 
+qsub -v a=${i},b=${fqnm_2_in},c=${fqnm_1_out},d=${fqnm_2_out} cutadapt.pbs 
+done 
+
+#创建cutadapt.pbs脚本文件
+$vi cutadapt.pbs
+#!/bin/bash -x
+#PBS -N cutadapt
+#PBS -l nodes=1:ppn=4
+#PBS -l walltime=100:00:00
+#PBS -l mem=5g
+#PBS -o /public/home/qinyw/data/practice/rice/clean_data_test/log
+#PBS -e /public/home/qinyw/data/practice/rice/clean_data_test/log
+
+$cd /public/home/qinyw/data/practice/rice/clean_data_test
+$cutadapt -q 20 -m 15 -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT -o ${c} -p ${d} ${a} ${b} >>tmp.1 2>>tmp.2
+
+#运行
+$chmod +x qc.sh
+$./cutadapt.sh
+$qstat -u qinyw
+```
+
+`对clean data 再次进行qc`
+```
+$ vi refastqc_cut.sh
+for i in /public/home/qinyw/data/practice/rice/clean_data_test/*.clean.fq.gz;do
+/public/home/qinyw/software/miniconda3/envs/rnaseq/bin/fastqc -o /public/home/qinyw/data/practice/rice/clean_data_test/refastqc ${i} & 
+done
+
+$ chmod +x refastqc_cut.sh
+$qsub refastqc_cut.sh
+
+#multiqc生成质控报告
+```
+
+## 2.比对到参考基因组：hisat2,stringtie,htseq-count
+`准备genome索引文件`
+```
+#准备文件
+$gffread all.gff3 -T -o MSU7.gtf
+
+cd ./Osativa
+$hisat2_extract_exons.py MSU7.gtf > exons.txt 
+$hisat2_extract_splice_sites.py MSU7.gtf > splicesites.txt
+
+# 建立索引
+$cat hisat2_build.pbs
+#!/bin/bash -x
+#PBS -N hisat2_build
+#PBS -l nodes=1:ppn=8
+#PBS -l walltime=24:00:00
+#PBS -l mem=10g
+#PBS -e /public/home/qinyw/data/practice/rice/reference/hisat2_indx
+#PBS -o /public/home/qinyw/data/practice/rice/reference/hisat2_indx
+
+hisat2-build --ss /public/home/qinyw/data/practice/rice/reference/Osativa/splicesites.txt --exon /public/home/qinyw/data/practice/rice/reference/Osativa/exons.txt -p 
+8 /public/home/qinyw/data/practice/rice/reference/hisat2_indx/all.con /public/home/qinyw/data/practice/rice/reference/hisat2_indx
+```
+
+`数据比对、组装、表达量统计`
+```
+#首先创建一个hisat.sh脚本文件，内容如下：
+$cat hisat.sh
+for i in /public/home/qinyw/data/practice/rice/clean/*_R1.gz;do # i是R1文件；＄是给变量赋值
+fq_2=${i/_R1.gz/}_R2.gz #fq_2是R2文件 
+flmn=`basename ${i}` #flmn 代表文库的名称，即R1 R2的前缀
+flmn=${flmn/_R1.gz/} 
+echo ${i}  #echo相当于把变量打印出来
+echo ${fq_2}
+echo ${flmn}
+qsub -v a=${i},b=${fq_2},c=${flmn} hisat.pbs #将a赋值为变量i(a代表R1);b赋值为变量fq_2(b代表R2);C赋值为变量flmn(c代表文库名称)；-v 将abc传送到hisat.pbs文件中
+done
+#以上这些步骤是在给变量赋值
+
+#首先要创建一个脚本文件hisat.pbs以及先要创建一个log文件夹
+$cat hisat.pbs
+#!/bin/bash -x
+#PBS -N hisat2
+#PBS -l nodes=1:ppn=8 #设置计算节点和每个节点的cpu数量
+#PBS -l walltime=24:00:00 #程序运行的最大时间为24小时
+#PBS -l mem=10g 
+#PBS -e  /public/home/qinyw/data/practice/rice/clean/log #错误输出文件（此处要注意先要创建一个log文件夹！）
+#PBS -o  /public/home/qinyw/data/practice/rice/clean/log #输出文件
+
+path="/public/home/qinyw/data/practice/rice/clean"
+
+mkdir ${path}/mapping
+cd ${path}/mapping
+mkdir -p ../stringtie
+mkdir -p ../reads_count
+
+hisat2 -q --dta -x /public/home/qinyw/data/practice/rice/reference/hisat2_indx/MSU7 -p 8 -1 $a -2 $b | samtools view -bhS -F 4 - | samtools sort -@ 7 -m 1G -o ${c}.sorted.bam -
+samtools index ${c}.sorted.bam
+samtools depth ${c}.sorted.bam > ${c}.cov
+awk '{a[NR]=$3;sum+=$3}END{for(i=1;i<=NR;i++)print $0"\t"a[i]/sum}' ${c}.cov > ${c}.ave.cov
+
+stringtie ${c}.sorted.bam -p 8 -G /public/home/qinyw/data/practice/rice/reference/Osativa/MSU7.gtf -e -o ../stringtie/${c}.gtf -l ../stringtie/${c}_reads -C ../stringtie/${c}.coverage -A ../stringtie/${c}_gene_abund.out
+htseq-count -s no -a 15 -f bam -r pos ${c}.sorted.bam /public/home/qinyw/data/practice/rice/reference/Osativa/MSU7.gtf > ../reads_count/${c}_reads.count
+### --dta：在HISAT2使用时加上–dta，这有利于stringtie的组装；没有修改链特异性参数，直接使用默认的非链特异性的参数
+```
+
+`运行`
+```
+$cd /public/home/qinyw/data/practice/rice/scripts
+$chmod +x hisat.* 
+$dos2unix hisat.* 
+$./hisat.sh
+$qstat -u qinyw
+```
+
+## 3.查看bam文件：samtools flagstat
+```
+samtools view H01-03-2N-1_combined.sorted.bam #文件很大，看起来很难
+(rnaseq) [qinyw@master01 mapping]$ samtools flagstat H02-03-6-2_combined.sorted.bam
+```
+
+## 4.IGV的下载与使用
+`IGV的下载`
+```
+(base) [qinyw@master01 ~]$ cd software/ #统一在这个路径下载软件
+(base) [qinyw@master01 software]$ wget https://data.broadinstitute.org/igv/projects/downloads/2.8/IGV_Linux_2.8.12_WithJava.zip
+```
+
+`IGV的使用`
+```
+#进入计算节点
+ssh -Y node08 #要加-Y才能显示图形界面
+#或者用qsub
+qsub -I -l nodes=node08:ppn=2 -X #qsub 要加-X
+
+#进入igv
+(base) [qinyw@master01 ~]$sh software/IGV_Linux_2.8.12/igv.sh
+```
